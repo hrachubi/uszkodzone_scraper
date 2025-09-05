@@ -1,0 +1,60 @@
+name: Rebel watcher (cron, artifacts state)
+
+on:
+  schedule:
+    - cron: "0 * * * *"          # co godzinę; zmień na */15, jeśli potrzebujesz co 15 min
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read     # potrzebne, by pobrać artifact z poprzedniego runa
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ↓ Pobierz artifact "rebel-state" z OSTATNIEGO udanego przebiegu tego samego workflow
+      - name: Download previous state artifact (if exists)
+        uses: dawidd6/action-download-artifact@v9
+        with:
+          workflow: rebel.yml
+          name: rebel-state
+          path: .
+          if_no_artifact_found: ignore
+
+      # Jeśli artifactu jeszcze nigdy nie było – utwórz pusty stan
+      - name: Ensure default state file exists
+        run: |
+          if [ ! -f "rebel_uszkodzone_seen.json" ]; then
+            echo '{"seen_ids": [], "last_check": null}' > rebel_uszkodzone_seen.json
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          pip install --no-cache-dir requests beautifulsoup4
+
+      - name: Run watcher
+        env:
+          # tu opcjonalnie Twoje sekrety do powiadomień itp.
+          # SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          # ...
+          # ścieżka stanu (jeśli w skrypcie używasz zmiennej)
+          REBEL_STATE_FILE: rebel_uszkodzone_seen.json
+        run: |
+          python rebel_watcher.py
+
+      # Zapisz zaktualizowany stan jako artifact o stałej nazwie
+      - name: Upload state artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rebel-state
+          path: rebel_uszkodzone_seen.json
+          retention-days: 90
