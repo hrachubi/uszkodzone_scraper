@@ -49,7 +49,7 @@ jobs:
           # ścieżka stanu (jeśli w skrypcie używasz zmiennej)
           REBEL_STATE_FILE: rebel_uszkodzone_seen.json
         run: |
-          python rebel_watcher.py
+          python rebel_uszkodzone.py
 
       # Zapisz zaktualizowany stan jako artifact o stałej nazwie
       - name: Upload state artifact
