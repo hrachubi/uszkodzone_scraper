@@ -33,7 +33,6 @@ from email.mime.multipart import MIMEMultipart
 # ---------- CONFIG (from DevTools) ----------
 
 ALGOLIA_APP_ID = "WN65FGR86G"
-ALGOLIA_API_KEY = "MGM2M2I3YjZjYWViZjI3YjFlMDUzZDhjOTgzOTIzOGU2NWIzYmE5NGQ4Y2Q0M2MwZWE1Y2E0N2ZkZDA5ZWQwZXZhbGlkVW50aWw9MTc1NzExNjgwMiZ1c2VyVG9rZW49aTgybGJwb2x0amgwMzBwNDRrb2JtOWdpYjk="  # search-only key
 
 ALGOLIA_SEARCH_URL = "https://wn65fgr86g-dsn.algolia.net/1/indexes/*/queries"
 
@@ -45,6 +44,9 @@ ALGOLIA_PARAMS_BASE = (
     "&facetFilters=%5B%5B%22availability%3Ain-stock%22%5D%2C%5B%22path.level1%3A108%7CPromocje%20%3E%201066%7CProdukty%20uszkodzone%22%5D%5D"
 )
 
+# Optional fallback (will be overridden by fresh key scraped from the page)
+ALGOLIA_API_KEY = os.environ.get("ALGOLIA_API_KEY", "")  # leave empty by default
+
 
 # 4) Build product URL template
 BASE_URL = "https://www.rebel.pl"
@@ -53,8 +55,9 @@ PRODUCT_URL_FMT = "{base}/{category}/{name}-{id}.html"
 # ---------- STATE ----------
 STATE_FILE = Path(os.environ.get("REBEL_STATE_FILE", "rebel_uszkodzone_seen.json"))
 
-ALGOLIA_AGENT = "Algolia for JavaScript (3.33.0); Browser (lite); JS Helper 2.20.1"
 CATEGORY_URL = "https://www.rebel.pl/promocje/1066-produkty-uszkodzone"
+ALGOLIA_AGENT = "Algolia for JavaScript (3.33.0); Browser (lite); JS Helper 2.20.1"
+
 
 
 # ---------- HELPERS ----------
@@ -99,50 +102,103 @@ def save_state(ids) -> None:
 
 # ---------- ALGOLIA QUERY ----------
 
-from urllib.parse import urlencode
+import re
+from urllib.parse import urlencode, unquote
 
-def query_algolia_page(session: requests.Session, page: int) -> dict:
+def fetch_fresh_algolia_key(timeout: int = 20) -> str | None:
     """
-    Post to Algolia with the same query params the browser uses.
+    Download the category page and try to extract a fresh secured Algolia key
+    (the one that contains validUntil=...).
+    Returns the raw (possibly URL-encoded) key string or None if not found.
     """
-    qs = {
-        "x-algolia-agent": ALGOLIA_AGENT,
-        "x-algolia-application-id": ALGOLIA_APP_ID,
-        "x-algolia-api-key": ALGOLIA_API_KEY,
-    }
-    url = f"{ALGOLIA_SEARCH_URL}?{urlencode(qs)}"
-    headers = {
-        "content-type": "application/json",
-        "accept": "application/json",
-        # referer/origin: używamy realnej strony kategorii
-        "origin": "https://www.rebel.pl",
-        "referer": CATEGORY_URL + "/",
-    }
-    payload = {
-        "requests": [
-            {"indexName": ALGOLIA_INDEX,
-             "params": f"{ALGOLIA_PARAMS_BASE}&page={page}"}
-        ]
-    }
-    resp = session.post(url, headers=headers, json=payload, timeout=20)
+    headers = {"User-Agent": USER_AGENT, "Accept": "text/html"}
+    r = requests.get(CATEGORY_URL, headers=headers, timeout=timeout)
+    r.raise_for_status()
+    html = r.text
+
+    # 1) Look for x-algolia-api-key in querystrings embedded in scripts
+    m = re.search(r"x-algolia-api-key=([A-Za-z0-9_%=+-]+)", html)
+    if m:
+        return unquote(m.group(1))
+
+    # 2) Look for JSON assignments like "apiKey":"<key>"
+    m = re.search(r'"apiKey"\s*:\s*"([A-Za-z0-9_=+-]+)"', html)
+    if m:
+        return m.group(1)
+
+    # 3) Sometimes the key is in data- attributes
+    m = re.search(r'data-algolia-api-key="([^"]+)"', html)
+    if m:
+        return m.group(1)
+
+    return None
+
+
+def query_algolia_page(session: requests.Session, page: int, api_key_cache: dict) -> dict:
+    """
+    Call Algolia 'queries' endpoint with the same style as the browser:
+    - x-algolia-agent / app-id / api-key in querystring
+    - JSON payload with {requests:[{indexName, params}]}
+    api_key_cache: a dict holding {'key': '...'} to reuse within one run.
+    """
+    # ensure we have a fresh key in the cache
+    if not api_key_cache.get("key"):
+        fresh = fetch_fresh_algolia_key()
+        if not fresh and ALGOLIA_API_KEY:
+            # fallback to whatever we have configured
+            fresh = ALGOLIA_API_KEY
+        if not fresh:
+            raise RuntimeError("Could not obtain Algolia API key from the page (and no fallback configured).")
+        api_key_cache["key"] = fresh
+
+    def do_request(using_key: str):
+        qs = {
+            "x-algolia-agent": ALGOLIA_AGENT,
+            "x-algolia-application-id": ALGOLIA_APP_ID,
+            "x-algolia-api-key": using_key,
+        }
+        url = f"{ALGOLIA_SEARCH_URL}?{urlencode(qs)}"
+        headers = {
+            "content-type": "application/json",
+            "accept": "application/json",
+            "origin": "https://www.rebel.pl",
+            "referer": CATEGORY_URL + "/",
+        }
+        payload = {
+            "requests": [
+                {"indexName": ALGOLIA_INDEX, "params": f"{ALGOLIA_PARAMS_BASE}&page={page}"}
+            ]
+        }
+        resp = session.post(url, headers=headers, json=payload, timeout=20)
+        return resp
+
+    resp = do_request(api_key_cache["key"])
+
+    # If the key expired mid-run, try to refresh once
+    if resp.status_code == 400 and "validUntil" in resp.text:
+        print("[INFO] Algolia key expired, refreshing…")
+        fresh = fetch_fresh_algolia_key()
+        if fresh:
+            api_key_cache["key"] = fresh
+            resp = do_request(api_key_cache["key"])
+
     if not resp.ok:
         print(f"[ERR] Algolia HTTP {resp.status_code}: {resp.text}")
         resp.raise_for_status()
+
     return resp.json()
 
 
+
 def collect_all_hits() -> list:
-    """
-    Paginates from page=0 .. nbPages-1 collecting 'hits' into a flat list.
-    """
     s = requests.Session()
     all_hits = []
     page = 0
     nb_pages = None
+    key_cache = {}  # will hold {'key': '...'} for this run
 
     while True:
-        data = query_algolia_page(s, page)
-        # 'results' is a list (because Algolia supports multiple queries in one call)
+        data = query_algolia_page(s, page, key_cache)
         results = data.get("results", [])
         if not results:
             break
@@ -150,12 +206,13 @@ def collect_all_hits() -> list:
         hits = r0.get("hits", [])
         all_hits.extend(hits)
 
-        nb_pages = r0.get("nbPages", 0)
+        nb_pages = int(r0.get("nbPages", 0))
         page += 1
         if page >= nb_pages:
             break
 
     return all_hits
+
 
 def hits_to_products(hits: list) -> list:
     """
