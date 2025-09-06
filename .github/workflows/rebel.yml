@@ -2,7 +2,7 @@ name: Rebel watcher (cron, artifacts state)
 
 on:
   schedule:
-    - cron: "0 * * * *"   # co godzinę; zmień na */15 * * * * jeśli chcesz co 15 min
+    - cron: "*/30 * * * *"   # co godzinę; zmień na */15 * * * * jeśli chcesz co 15 min
   workflow_dispatch: {}
 
 jobs:
