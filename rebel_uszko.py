@@ -53,6 +53,10 @@ PRODUCT_URL_FMT = "{base}/{category}/{name}-{id}.html"
 # ---------- STATE ----------
 STATE_FILE = Path(os.environ.get("REBEL_STATE_FILE", "rebel_uszkodzone_seen.json"))
 
+ALGOLIA_AGENT = "Algolia for JavaScript (3.33.0); Browser (lite); JS Helper 2.20.1"
+CATEGORY_URL = "https://www.rebel.pl/promocje/1066-produkty-uszkodzone"
+
+
 # ---------- HELPERS ----------
 
 def extract_id_from_hit(hit: dict) -> str:
@@ -95,31 +99,37 @@ def save_state(ids) -> None:
 
 # ---------- ALGOLIA QUERY ----------
 
+from urllib.parse import urlencode
+
 def query_algolia_page(session: requests.Session, page: int) -> dict:
     """
-    Executes a single Algolia 'multiple queries' call for one page of the category.
-    Returns the json dict for the whole response.
+    Post to Algolia with the same query params the browser uses.
     """
-    headers = {
+    qs = {
+        "x-algolia-agent": ALGOLIA_AGENT,
         "x-algolia-application-id": ALGOLIA_APP_ID,
         "x-algolia-api-key": ALGOLIA_API_KEY,
+    }
+    url = f"{ALGOLIA_SEARCH_URL}?{urlencode(qs)}"
+    headers = {
         "content-type": "application/json",
         "accept": "application/json",
-        "origin": BASE_URL,
-        "referer": BASE_URL + "/",
+        # referer/origin: używamy realnej strony kategorii
+        "origin": "https://www.rebel.pl",
+        "referer": CATEGORY_URL + "/",
     }
-    # We send one query in the 'requests' array. You could send multiple if needed.
     payload = {
         "requests": [
-            {
-                "indexName": ALGOLIA_INDEX,
-                "params": f"{ALGOLIA_PARAMS_BASE}&page={page}"
-            }
+            {"indexName": ALGOLIA_INDEX,
+             "params": f"{ALGOLIA_PARAMS_BASE}&page={page}"}
         ]
     }
-    resp = session.post(ALGOLIA_SEARCH_URL, headers=headers, json=payload, timeout=20)
-    resp.raise_for_status()
+    resp = session.post(url, headers=headers, json=payload, timeout=20)
+    if not resp.ok:
+        print(f"[ERR] Algolia HTTP {resp.status_code}: {resp.text}")
+        resp.raise_for_status()
     return resp.json()
+
 
 def collect_all_hits() -> list:
     """
