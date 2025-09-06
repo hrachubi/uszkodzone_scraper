@@ -105,7 +105,7 @@ def save_state(ids) -> None:
 import re
 from urllib.parse import urlencode, unquote
 
-def fetch_fresh_algolia_key(timeout: int = 20) -> str | None:
+def fetch_fresh_algolia_key(timeout: int = 20):
     """
     Download the category page and try to extract a fresh secured Algolia key
     (the one that contains validUntil=...).
