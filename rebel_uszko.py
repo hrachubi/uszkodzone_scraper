@@ -17,7 +17,6 @@ import re
 import json
 from pathlib import Path
 from datetime import datetime, timezone
-from urllib.parse import urljoin
 
 import requests
 
@@ -25,6 +24,10 @@ import smtplib
 import ssl
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+
+from urllib.parse import urlencode, unquote, urljoin
+from bs4 import BeautifulSoup  # jeśli usunąłeś, dodaj z powrotem do requirements
+
 
 
 # ---------- CONFIG (fill from DevTools) ----------
@@ -180,8 +183,7 @@ def query_algolia_page(session: requests.Session, page: int, api_key_cache: dict
 
 def collect_all_hits() -> list:
     s = requests.Session()
-    all_hits = []
-    page = 0
+    all_hits, page = [], 0
     key_cache = {}  # {'key': '...'}
     while True:
         data = query_algolia_page(s, page, key_cache)
@@ -196,6 +198,7 @@ def collect_all_hits() -> list:
         if page >= nb_pages:
             break
     return all_hits
+
 
 
 
@@ -281,16 +284,33 @@ def send_email_new_products(new_products: list) -> None:
         print(f"[WARN] Failed to send email: {e}")
 
 
-import re
-from urllib.parse import urlencode, unquote, urljoin
-from bs4 import BeautifulSoup  # jeśli usunąłeś, dodaj z powrotem do requirements
 
+
+# Szukamy zarówno w postaci urlencoded, jak i czystej
 KEY_PATTERNS = [
-    r"x-algolia-api-key=([A-Za-z0-9_%=+\-]+)",
-    r'"x-algolia-api-key"\s*:\s*"([A-Za-z0-9_=+\-]+)"',
-    r'"apiKey"\s*:\s*"([A-Za-z0-9_=+\-]+)"',
-    r"algoliaApiKey\s*=\s*\"([A-Za-z0-9_=+\-]+)\"",
+    r'x-algolia-api-key=([A-Za-z0-9_%=+\-]+)',
+    r'"x-algolia-api-key"\s*:\s*"([^"]+)"',
+    r"'x-algolia-api-key'\s*:\s*'([^']+)'",
+    r'"apiKey"\s*:\s*"([^"]+)"',
+    r"'apiKey'\s*:\s*'([^']+)'",
+    r'algoliaApiKey\s*=\s*"([^"]+)"',
+    r"algoliaApiKey\s*=\s*'([^']+)'",
 ]
+
+def _extract_key_candidates(text: str) -> list[str]:
+    cands = []
+    for pat in KEY_PATTERNS:
+        for m in re.finditer(pat, text):
+            raw = m.group(1)
+            try:
+                val = unquote(raw)
+            except Exception:
+                val = raw
+            cands.append(val)
+    # prefer te, które wyglądają na secured key (zawierają validUntil=)
+    cands_sorted = sorted(cands, key=lambda s: ('validUntil=' not in s, -len(s)))
+    return cands_sorted
+
 
 def _extract_key(text: str) -> str | None:
     for pat in KEY_PATTERNS:
@@ -300,47 +320,45 @@ def _extract_key(text: str) -> str | None:
     return None
 
 def fetch_fresh_algolia_key(timeout: int = 20) -> str | None:
-    """
-    1) Try to grab key from category HTML.
-    2) If not present, fetch same-origin JS scripts and scan them.
-    Returns a 'secured' key that contains validUntil=...
-    """
     headers = {"User-Agent": USER_AGENT, "Accept": "text/html"}
     r = requests.get(CATEGORY_URL, headers=headers, timeout=timeout)
     r.raise_for_status()
     html = r.text
 
-    # 1) direct in HTML (querystrings, inline config)
-    key = _extract_key(html)
-    if key:
-        return key
+    # 1) HTML (cały dokument)
+    cands = _extract_key_candidates(html)
+    # 1a) Inline <script>…</script> (jeśli wzorce były w JS wstrzykniętym w HTML)
+    for m in re.finditer(r"<script[^>]*>(.*?)</script>", html, flags=re.I | re.S):
+        cands.extend(_extract_key_candidates(m.group(1)))
 
-    # 2) scan first-party scripts
-    soup = BeautifulSoup(html, "html.parser")
-    script_srcs = []
-    for s in soup.find_all("script", src=True):
-        src = s["src"]
-        # tylko skrypty z rebel.pl (unikamy CDN-ów obcych domen)
-        if src.startswith("http"):
-            if "rebel.pl" not in src:
-                continue
-            abs_src = src
-        else:
-            abs_src = urljoin("https://www.rebel.pl", src)
-        script_srcs.append(abs_src)
+    # 2) Zewnętrzne skrypty (src z tej samej domeny i subdomen)
+    script_srcs = re.findall(r'<script[^>]+src="([^"]+)"', html, flags=re.I)
+    to_check = []
+    for src in script_srcs:
+        abs_src = src if src.startswith("http") else urljoin("https://www.rebel.pl", src)
+        # dopuszczamy wszystkie subdomeny rebel.pl (files., static., itd.)
+        if ".rebel.pl" in abs_src or abs_src.startswith("https://www.rebel.pl"):
+            to_check.append(abs_src)
 
-    # ogranicz się do kilkunastu, żeby nie mielić wszystkiego
-    for src in script_srcs[:15]:
+    for src in to_check[:25]:
         try:
             rs = requests.get(src, headers={"User-Agent": USER_AGENT}, timeout=timeout)
             if rs.ok:
-                key = _extract_key(rs.text)
-                if key:
-                    return key
+                cands.extend(_extract_key_candidates(rs.text))
         except Exception:
-            continue
+            pass
 
+    # Debug: pokaż ile kandydatów znaleziono (bez wypisywania samych kluczy)
+    print(f"[INFO] Algolia key candidates found: {len(cands)}")
+
+    # Wybierz pierwszy, który zawiera validUntil= (secured key)
+    for k in cands:
+        if "validUntil=" in k:
+            return k
+
+    # Jeśli nic nie ma, zwróć None
     return None
+
 
 
 # ---------- MAIN ----------
