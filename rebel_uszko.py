@@ -282,6 +282,7 @@ def send_email_new_products(new_products: list) -> None:
 # --- Stronger key extraction ---
 
 ACCEPT_LANG = "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7"
+WITH_ALGOLIA_CALL = r"REBEL\.searchWithAlgolia\(\s*'(?P<app>[A-Z0-9]+)'\s*,\s*'(?P<key>[^']+)'"
 
 KEY_PATTERNS = [
     # proste przypadki w JSON/JS
@@ -318,6 +319,16 @@ def fetch_fresh_algolia_key(timeout: int = 20) -> str | None:
         "Accept": "text/html",
         "Accept-Language": ACCEPT_LANG,
     }
+
+    m = re.search(WITH_ALGOLIA_CALL, html)
+    if m:
+        fresh = m.group('key')
+        # (opcjonalnie) sprawdź, czy wygląda jak secured key
+        if 'validUntil=' in fresh or '%3DvalidUntil%3D' in fresh:
+            return fresh
+        # jeśli nie ma validUntil, i tak zwróć – może być zwykły search key
+        return fresh
+
     r = requests.get(CATEGORY_URL, headers=headers, timeout=timeout)
     r.raise_for_status()
     html = r.text
