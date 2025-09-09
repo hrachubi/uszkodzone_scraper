@@ -48,6 +48,7 @@ ALGOLIA_PARAMS_BASE = (
 ALGOLIA_API_KEY = os.environ.get("ALGOLIA_API_KEY", "")  # leave empty by default
 
 
+
 # 4) Build product URL template
 BASE_URL = "https://www.rebel.pl"
 PRODUCT_URL_FMT = "{base}/{category}/{name}-{id}.html"
@@ -58,6 +59,14 @@ STATE_FILE = Path(os.environ.get("REBEL_STATE_FILE", "rebel_uszkodzone_seen.json
 CATEGORY_URL = "https://www.rebel.pl/promocje/1066-produkty-uszkodzone"
 ALGOLIA_AGENT = "Algolia for JavaScript (3.33.0); Browser (lite); JS Helper 2.20.1"
 
+CATEGORY_URL = "https://www.rebel.pl/promocje/1066-produkty-uszkodzone"
+ALGOLIA_AGENT = "Algolia for JavaScript (3.33.0); Browser (lite); JS Helper 2.20.1"
+
+ALGOLIA_APP_ID = "WN65FGR86G"
+ALGOLIA_SEARCH_URL = "https://wn65fgr86g-dsn.algolia.net/1/indexes/*/queries"
+
+# NIE trzymaj tu wygasającego secured key – zostaw puste jako fallback środowiskowy
+ALGOLIA_API_KEY = os.environ.get("ALGOLIA_API_KEY", "")
 
 
 # ---------- HELPERS ----------
@@ -105,50 +114,21 @@ def save_state(ids) -> None:
 import re
 from urllib.parse import urlencode, unquote
 
-def fetch_fresh_algolia_key(timeout: int = 20) -> str | None:
-    """
-    Download the category page and try to extract a fresh secured Algolia key
-    (the one that contains validUntil=...).
-    Returns the raw (possibly URL-encoded) key string or None if not found.
-    """
-    headers = {"User-Agent": USER_AGENT, "Accept": "text/html"}
-    r = requests.get(CATEGORY_URL, headers=headers, timeout=timeout)
-    r.raise_for_status()
-    html = r.text
 
-    # 1) Look for x-algolia-api-key in querystrings embedded in scripts
-    m = re.search(r"x-algolia-api-key=([A-Za-z0-9_%=+-]+)", html)
-    if m:
-        return unquote(m.group(1))
-
-    # 2) Look for JSON assignments like "apiKey":"<key>"
-    m = re.search(r'"apiKey"\s*:\s*"([A-Za-z0-9_=+-]+)"', html)
-    if m:
-        return m.group(1)
-
-    # 3) Sometimes the key is in data- attributes
-    m = re.search(r'data-algolia-api-key="([^"]+)"', html)
-    if m:
-        return m.group(1)
-
-    return None
-
+from urllib.parse import urlencode
 
 def query_algolia_page(session: requests.Session, page: int, api_key_cache: dict) -> dict:
     """
-    Call Algolia 'queries' endpoint with the same style as the browser:
-    - x-algolia-agent / app-id / api-key in querystring
-    - JSON payload with {requests:[{indexName, params}]}
-    api_key_cache: a dict holding {'key': '...'} to reuse within one run.
+    Uderza do Algolii w taki sam sposób jak front (agent/appId/key w querystringu).
+    Jeśli dostanie 400 z 'validUntil', odświeża klucz i próbuje ponownie (1x).
     """
-    # ensure we have a fresh key in the cache
+    # ensure we have a fresh key
     if not api_key_cache.get("key"):
         fresh = fetch_fresh_algolia_key()
         if not fresh and ALGOLIA_API_KEY:
-            # fallback to whatever we have configured
-            fresh = ALGOLIA_API_KEY
+            fresh = ALGOLIA_API_KEY  # last-resort fallback
         if not fresh:
-            raise RuntimeError("Could not obtain Algolia API key from the page (and no fallback configured).")
+            raise RuntimeError("Nie mogę uzyskać świeżego Algolia API key z HTML/JS (brak fallbacku).")
         api_key_cache["key"] = fresh
 
     def do_request(using_key: str):
@@ -166,17 +146,16 @@ def query_algolia_page(session: requests.Session, page: int, api_key_cache: dict
         }
         payload = {
             "requests": [
-                {"indexName": ALGOLIA_INDEX, "params": f"{ALGOLIA_PARAMS_BASE}&page={page}"}
+                {"indexName": ALGOLIA_INDEX,
+                 "params": f"{ALGOLIA_PARAMS_BASE}&page={page}"}
             ]
         }
-        resp = session.post(url, headers=headers, json=payload, timeout=20)
-        return resp
+        return session.post(url, headers=headers, json=payload, timeout=20)
 
     resp = do_request(api_key_cache["key"])
 
-    # If the key expired mid-run, try to refresh once
     if resp.status_code == 400 and "validUntil" in resp.text:
-        print("[INFO] Algolia key expired, refreshing…")
+        print("[INFO] Algolia key expired mid-run, refreshing…")
         fresh = fetch_fresh_algolia_key()
         if fresh:
             api_key_cache["key"] = fresh
@@ -190,13 +169,12 @@ def query_algolia_page(session: requests.Session, page: int, api_key_cache: dict
 
 
 
+
 def collect_all_hits() -> list:
     s = requests.Session()
     all_hits = []
     page = 0
-    nb_pages = None
-    key_cache = {}  # will hold {'key': '...'} for this run
-
+    key_cache = {}  # {'key': '...'}
     while True:
         data = query_algolia_page(s, page, key_cache)
         results = data.get("results", [])
@@ -205,13 +183,12 @@ def collect_all_hits() -> list:
         r0 = results[0]
         hits = r0.get("hits", [])
         all_hits.extend(hits)
-
         nb_pages = int(r0.get("nbPages", 0))
         page += 1
         if page >= nb_pages:
             break
-
     return all_hits
+
 
 
 def hits_to_products(hits: list) -> list:
@@ -294,6 +271,68 @@ def send_email_new_products(new_products: list) -> None:
         print(f"[INFO] Email sent to: {', '.join(recipients)}")
     except Exception as e:
         print(f"[WARN] Failed to send email: {e}")
+
+
+import re
+from urllib.parse import urlencode, unquote, urljoin
+from bs4 import BeautifulSoup  # jeśli usunąłeś, dodaj z powrotem do requirements
+
+KEY_PATTERNS = [
+    r"x-algolia-api-key=([A-Za-z0-9_%=+\-]+)",
+    r'"x-algolia-api-key"\s*:\s*"([A-Za-z0-9_=+\-]+)"',
+    r'"apiKey"\s*:\s*"([A-Za-z0-9_=+\-]+)"',
+    r"algoliaApiKey\s*=\s*\"([A-Za-z0-9_=+\-]+)\"",
+]
+
+def _extract_key(text: str) -> str | None:
+    for pat in KEY_PATTERNS:
+        m = re.search(pat, text)
+        if m:
+            return unquote(m.group(1))
+    return None
+
+def fetch_fresh_algolia_key(timeout: int = 20) -> str | None:
+    """
+    1) Try to grab key from category HTML.
+    2) If not present, fetch same-origin JS scripts and scan them.
+    Returns a 'secured' key that contains validUntil=...
+    """
+    headers = {"User-Agent": USER_AGENT, "Accept": "text/html"}
+    r = requests.get(CATEGORY_URL, headers=headers, timeout=timeout)
+    r.raise_for_status()
+    html = r.text
+
+    # 1) direct in HTML (querystrings, inline config)
+    key = _extract_key(html)
+    if key:
+        return key
+
+    # 2) scan first-party scripts
+    soup = BeautifulSoup(html, "html.parser")
+    script_srcs = []
+    for s in soup.find_all("script", src=True):
+        src = s["src"]
+        # tylko skrypty z rebel.pl (unikamy CDN-ów obcych domen)
+        if src.startswith("http"):
+            if "rebel.pl" not in src:
+                continue
+            abs_src = src
+        else:
+            abs_src = urljoin("https://www.rebel.pl", src)
+        script_srcs.append(abs_src)
+
+    # ogranicz się do kilkunastu, żeby nie mielić wszystkiego
+    for src in script_srcs[:15]:
+        try:
+            rs = requests.get(src, headers={"User-Agent": USER_AGENT}, timeout=timeout)
+            if rs.ok:
+                key = _extract_key(rs.text)
+                if key:
+                    return key
+        except Exception:
+            continue
+
+    return None
 
 
 # ---------- MAIN ----------
