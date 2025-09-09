@@ -28,8 +28,6 @@ from email.mime.multipart import MIMEMultipart
 from urllib.parse import urlencode, unquote, urljoin
 from bs4 import BeautifulSoup  # jeśli usunąłeś, dodaj z powrotem do requirements
 
-
-
 # ---------- CONFIG (fill from DevTools) ----------
 
 # 1) From request headers in DevTools (x-algolia-application-id / x-algolia-api-key)
@@ -122,11 +120,7 @@ def save_state(ids) -> None:
 
 # ---------- ALGOLIA QUERY ----------
 
-import re
-from urllib.parse import urlencode, unquote
 
-
-from urllib.parse import urlencode
 
 def query_algolia_page(session: requests.Session, page: int, api_key_cache: dict) -> dict:
     """
@@ -284,17 +278,23 @@ def send_email_new_products(new_products: list) -> None:
         print(f"[WARN] Failed to send email: {e}")
 
 
-
-
 # Szukamy zarówno w postaci urlencoded, jak i czystej
+# --- Stronger key extraction ---
+
+ACCEPT_LANG = "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7"
+
 KEY_PATTERNS = [
-    r'x-algolia-api-key=([A-Za-z0-9_%=+\-]+)',
+    # proste przypadki w JSON/JS
     r'"x-algolia-api-key"\s*:\s*"([^"]+)"',
     r"'x-algolia-api-key'\s*:\s*'([^']+)'",
     r'"apiKey"\s*:\s*"([^"]+)"',
     r"'apiKey'\s*:\s*'([^']+)'",
     r'algoliaApiKey\s*=\s*"([^"]+)"',
     r"algoliaApiKey\s*=\s*'([^']+)'",
+    # w URL-ach (querystring, może być w 100% urlencoded)
+    r'x-algolia-api-key=([A-Za-z0-9_%=+\-]+)',
+    # ultra-agresywny: jakikolwiek token zawierający validUntil= (encoded lub nie)
+    r'([A-Za-z0-9_%=+\-]*validUntil(?:%3D|=)\d{6,}[^"&\'\s]*)',
 ]
 
 def _extract_key_candidates(text: str) -> list[str]:
@@ -307,57 +307,58 @@ def _extract_key_candidates(text: str) -> list[str]:
             except Exception:
                 val = raw
             cands.append(val)
-    # prefer te, które wyglądają na secured key (zawierają validUntil=)
-    cands_sorted = sorted(cands, key=lambda s: ('validUntil=' not in s, -len(s)))
-    return cands_sorted
-
-
-def _extract_key(text: str) -> str | None:
-    for pat in KEY_PATTERNS:
-        m = re.search(pat, text)
-        if m:
-            return unquote(m.group(1))
-    return None
+    # prefer secured key (z validUntil=), potem dłuższe
+    cands = sorted(set(cands), key=lambda s: ('validUntil=' not in s, -len(s)))
+    return cands
 
 def fetch_fresh_algolia_key(timeout: int = 20) -> str | None:
-    headers = {"User-Agent": USER_AGENT, "Accept": "text/html"}
+    # 1) Pobierz HTML kategorii
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "text/html",
+        "Accept-Language": ACCEPT_LANG,
+    }
     r = requests.get(CATEGORY_URL, headers=headers, timeout=timeout)
     r.raise_for_status()
     html = r.text
 
-    # 1) HTML (cały dokument)
+    # 1a) Szukaj w całym HTML + inline <script>
     cands = _extract_key_candidates(html)
-    # 1a) Inline <script>…</script> (jeśli wzorce były w JS wstrzykniętym w HTML)
     for m in re.finditer(r"<script[^>]*>(.*?)</script>", html, flags=re.I | re.S):
         cands.extend(_extract_key_candidates(m.group(1)))
 
-    # 2) Zewnętrzne skrypty (src z tej samej domeny i subdomen)
+    # 2) Zewnętrzne skrypty z *.rebel.pl (assets, files, static…)
     script_srcs = re.findall(r'<script[^>]+src="([^"]+)"', html, flags=re.I)
     to_check = []
     for src in script_srcs:
         abs_src = src if src.startswith("http") else urljoin("https://www.rebel.pl", src)
-        # dopuszczamy wszystkie subdomeny rebel.pl (files., static., itd.)
         if ".rebel.pl" in abs_src or abs_src.startswith("https://www.rebel.pl"):
             to_check.append(abs_src)
 
-    for src in to_check[:25]:
+    for src in to_check[:40]:
         try:
-            rs = requests.get(src, headers={"User-Agent": USER_AGENT}, timeout=timeout)
+            rs = requests.get(src, headers={"User-Agent": USER_AGENT, "Accept-Language": ACCEPT_LANG}, timeout=timeout)
             if rs.ok:
                 cands.extend(_extract_key_candidates(rs.text))
         except Exception:
             pass
 
-    # Debug: pokaż ile kandydatów znaleziono (bez wypisywania samych kluczy)
+    # deduplikacja + preferencje
+    cands = _extract_key_candidates("\n".join(cands))
     print(f"[INFO] Algolia key candidates found: {len(cands)}")
 
-    # Wybierz pierwszy, który zawiera validUntil= (secured key)
     for k in cands:
         if "validUntil=" in k:
             return k
 
-    # Jeśli nic nie ma, zwróć None
+    # Debug: zapisz HTML do diagnozy (jako artifact)
+    try:
+        Path("debug_rebel_category.html").write_text(html, encoding="utf-8")
+        print("[WARN] No Algolia key found; saved debug_rebel_category.html")
+    except Exception:
+        pass
     return None
+
 
 
 
