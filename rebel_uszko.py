@@ -32,6 +32,14 @@ from email.mime.multipart import MIMEMultipart
 # 1) From request headers in DevTools (x-algolia-application-id / x-algolia-api-key)
 # ---------- CONFIG (from DevTools) ----------
 
+# Network settings
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0 Safari/537.36"
+)
+
+
 ALGOLIA_APP_ID = "WN65FGR86G"
 
 ALGOLIA_SEARCH_URL = "https://wn65fgr86g-dsn.algolia.net/1/indexes/*/queries"
