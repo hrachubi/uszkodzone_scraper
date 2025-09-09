@@ -319,7 +319,9 @@ def fetch_fresh_algolia_key(timeout: int = 20) -> str | None:
         "Accept": "text/html",
         "Accept-Language": ACCEPT_LANG,
     }
-
+    r = requests.get(CATEGORY_URL, headers=headers, timeout=timeout)
+    r.raise_for_status()
+    html = r.text
     m = re.search(WITH_ALGOLIA_CALL, html)
     if m:
         fresh = m.group('key')
@@ -329,9 +331,7 @@ def fetch_fresh_algolia_key(timeout: int = 20) -> str | None:
         # jeśli nie ma validUntil, i tak zwróć – może być zwykły search key
         return fresh
 
-    r = requests.get(CATEGORY_URL, headers=headers, timeout=timeout)
-    r.raise_for_status()
-    html = r.text
+
 
     # 1a) Szukaj w całym HTML + inline <script>
     cands = _extract_key_candidates(html)
