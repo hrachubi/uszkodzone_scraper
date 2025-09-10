@@ -50,13 +50,72 @@ jobs:
           ALGOLIA_API_KEY: ${{ secrets.ALGOLIA_API_KEY }}
         run: python rebel_uszko.py
 
+      - name: Check for new products (set output)
+        id: check_new
+        run: |
+          count=$(jq 'length' new_products.json 2>/dev/null || echo 0)
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifacts (json & md)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rebel-new-products
+          path: |
+            new_products.json
+            new_products.md
+          retention-days: 7
+
+      - name: Create or update Issue with new products
+        if: steps.check_new.outputs.count != '0'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const md = fs.readFileSync('new_products.md', 'utf8');
+
+            const owner = context.repo.owner;
+            const repo  = context.repo.repo;
+            const title = "Rebel: nowe produkty uszkodzone";
+
+            // 1) Spróbuj znaleźć istniejące Issue po tytule (otwarte)
+            const issues = await github.rest.search.issuesAndPullRequests({
+              q: `repo:${owner}/${repo} is:issue is:open in:title "${title}"`
+            });
+
+            let issueNumber;
+            if (issues.data.items.length > 0) {
+              issueNumber = issues.data.items[0].number;
+            } else {
+              // 2) Jeśli nie ma — utwórz
+              const created = await github.rest.issues.create({
+                owner, repo, title,
+                body: "Stałe zgłoszenie do notyfikacji nowości z kategorii **Produkty uszkodzone**."
+              });
+              issueNumber = created.data.number;
+            }
+
+            // 3) Dodaj komentarz z listą nowości i @-mention dla powiadomienia
+            await github.rest.issues.createComment({
+              owner, repo, issue_number: issueNumber,
+              body: md + `\n\nPing: @hrachubi`
+            });
+
+      - name: Add run summary
+        if: always()
+        run: |
+          echo "### Rebel – wynik skanowania" >> $GITHUB_STEP_SUMMARY
+          echo "- Liczba nowości: ${{ steps.check_new.outputs.count }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          sed -n '1,120p' new_products.md >> $GITHUB_STEP_SUMMARY || true
+
 
       - name: Upload state artifact
         uses: actions/upload-artifact@v4
         with:
           name: rebel-state
           path: rebel_uszkodzone_seen.json
-          retention-days: 90
+          retention-days: 7
 
       - name: Upload debug HTML (if any)
         if: ${{ hashFiles('debug_rebel_category.html') != '' }}
