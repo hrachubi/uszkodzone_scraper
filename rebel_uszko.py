@@ -399,7 +399,27 @@ def main() -> int:
 
     # Persist updated state
     save_state(seen_ids.union(current_ids))
-    send_email_new_products(new_products)       
+    send_email_new_products(new_products)
+      # Zapisz listę nowości do pliku (dla workflow)
+    with open("new_products.json", "w", encoding="utf-8") as f:
+        json.dump(new_products, f, ensure_ascii=False, indent=2)
+
+    # Krótka wersja Markdown do komentarza/Issue
+    if new_products:
+        lines = []
+        for p in new_products:
+            price = f" — {p.get('price')}" if p.get("price") else ""
+            lines.append(f"- [{p['title']}]({p['url']}){price}")
+        Path("new_products.md").write_text(
+            "# Nowe produkty uszkodzone\n\n" + "\n".join(lines) + "\n",
+            encoding="utf-8"
+        )
+    else:
+        Path("new_products.md").write_text(
+            "# Nowe produkty uszkodzone\n\nBrak nowości w tym runie.\n",
+            encoding="utf-8"
+        )
+
 
     return 0
 
